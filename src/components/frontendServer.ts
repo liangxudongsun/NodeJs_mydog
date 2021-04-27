@@ -14,9 +14,6 @@ export class FrontendServer {
         this.app = app;
     }
 
-    /**
-     * 启动
-     */
     start(cb: Function) {
         initSessionApp(this.app);
 
@@ -31,10 +28,7 @@ export class FrontendServer {
         let mydog: typeof indexDts = require("../mydog");
         let connectorConfig = this.app.someconfig.connector || {};
         let connectorConstructor: I_connectorConstructor = connectorConfig.connector as any || mydog.connector.connectorTcp;
-        let defaultEncodeDecode: Required<indexDts.I_encodeDecodeConfig> = protocol.Tcp_EncodeDecode;
-        if (connectorConstructor === mydog.connector.connectorWs as any || connectorConstructor === mydog.connector.connectorWss as any) {
-            defaultEncodeDecode = protocol.Ws_EncodeDecode;
-        }
+        let defaultEncodeDecode: Required<indexDts.I_encodeDecodeConfig> = protocol.default_encodeDecode;
         let encodeDecodeConfig = this.app.someconfig.encodeDecode || {};
         this.app.protoEncode = encodeDecodeConfig.protoEncode || defaultEncodeDecode.protoEncode;
         this.app.msgEncode = encodeDecodeConfig.msgEncode || defaultEncodeDecode.msgEncode;
@@ -50,7 +44,7 @@ export class FrontendServer {
     }
 
     /**
-     * 同步session
+     * Sync session
      */
     applySession(data: Buffer) {
         let session = JSON.parse(data.slice(1).toString()) as sessionCopyJson;
@@ -60,7 +54,7 @@ export class FrontendServer {
         }
     }
     /**
-     * 前端服将后端服的消息转发给客户端
+     * The front-end server forwards the message of the back-end server to the client
      */
     sendMsgByUids(data: Buffer) {
         let uidBuffLen = data.readUInt16BE(1);
@@ -103,7 +97,7 @@ class ClientManager implements I_clientManager {
     }
 
     /**
-     * 前端服务器加载路由处理
+     * Front-end server load routing processing
      */
     private loadHandler() {
         let dirName = path.join(this.app.base, define.some_config.File_Dir.Servers, this.serverType, "handler");
@@ -176,7 +170,7 @@ class ClientManager implements I_clientManager {
     }
 
     /**
-     * 回调
+     * Callback
      */
     private callBack(client: I_clientSocket, cmd: number) {
         let self = this;
@@ -190,7 +184,7 @@ class ClientManager implements I_clientManager {
     }
 
     /**
-     * 转发客户端消息到后端服务器
+     * Forward client messages to the backend server
      */
     private doRemote(msg: { "cmd": number, "msg": Buffer }, session: Session, cmdArr: string[]) {
         let id = this.router[cmdArr[0]](session);
