@@ -1,9 +1,9 @@
 import Application from "../application";
 import tcpServer from "../components/tcpServer";
-import { I_clientManager, I_clientSocket, SocketProxy } from "../util/interfaceDefine";
+import { I_clientManager, I_clientSocket, SocketProxy, I_connectorConfig } from "../util/interfaceDefine";
 import * as define from "../util/define";
-import { I_connectorConfig } from "../..";
 import { Session } from "../components/session";
+import * as crypto from "crypto";
 
 let maxLen = 0;
 /**
@@ -12,13 +12,15 @@ let maxLen = 0;
 export class ConnectorTcp {
     public app: Application;
     public clientManager: I_clientManager = null as any;
-    public handshakeBuf: Buffer;        // Handshake buffer
+    public handshakeBuf: Buffer = null as any;        // Handshake buffer
+    public handshakeBufAll: Buffer = null as any;        // Handshake buffer all
     public heartbeatBuf: Buffer;        // Heartbeat response buffer
     public heartbeatTime: number = 0;   // Heartbeat time
     private maxConnectionNum: number = Number.POSITIVE_INFINITY;
     public nowConnectionNum: number = 0;
     public sendCache = false;
     public interval: number = 0;
+    public md5 = "";    // route array md5
 
     constructor(info: { app: Application, clientManager: I_clientManager, config: I_connectorConfig, startCb: () => void }) {
         this.app = info.app;
@@ -41,11 +43,20 @@ export class ConnectorTcp {
 
 
         // Handshake buffer
-        let routeBuf = Buffer.from(JSON.stringify({ "route": this.app.routeConfig, "heartbeat": this.heartbeatTime / 1000 }));
+        let cipher = crypto.createHash("md5")
+        this.md5 = cipher.update(JSON.stringify(this.app.routeConfig)).digest("hex");
+
+        let routeBuf = Buffer.from(JSON.stringify({ "md5": this.md5, "heartbeat": this.heartbeatTime / 1000 }));
         this.handshakeBuf = Buffer.alloc(routeBuf.length + 5);
         this.handshakeBuf.writeUInt32BE(routeBuf.length + 1, 0);
         this.handshakeBuf.writeUInt8(define.Server_To_Client.handshake, 4);
         routeBuf.copy(this.handshakeBuf, 5);
+
+        let routeBufAll = Buffer.from(JSON.stringify({ "md5": this.md5, "route": this.app.routeConfig, "heartbeat": this.heartbeatTime / 1000 }));
+        this.handshakeBufAll = Buffer.alloc(routeBufAll.length + 5);
+        this.handshakeBufAll.writeUInt32BE(routeBufAll.length + 1, 0);
+        this.handshakeBufAll.writeUInt8(define.Server_To_Client.handshake, 4);
+        routeBufAll.copy(this.handshakeBufAll, 5);
 
         // Heartbeat response buffer
         this.heartbeatBuf = Buffer.alloc(5);
@@ -68,7 +79,6 @@ class ClientSocket implements I_clientSocket {
     remoteAddress: string = "";
     private connector: ConnectorTcp;
     private clientManager: I_clientManager;
-    private handshakeOver: boolean = false;                 // Whether the handshake has been successful
     private socket: SocketProxy;                            // socket
     private registerTimer: NodeJS.Timer = null as any;      // Handshake timeout timer
     private heartbeatTimer: NodeJS.Timer = null as any;     // Heartbeat timeout timer
@@ -85,7 +95,7 @@ class ClientSocket implements I_clientSocket {
         this.clientManager = clientManager;
         this.socket = socket;
         this.remoteAddress = socket.remoteAddress;
-        this.socket.maxLen = 5;   // Up to 5 byte of data when not registered
+        this.socket.maxLen = 50;   // Up to 50 byte of data when not registered
         socket.once('data', this.onRegister.bind(this));
         socket.on('close', this.onClose.bind(this));
         this.registerTimer = setTimeout(() => {
@@ -96,7 +106,7 @@ class ClientSocket implements I_clientSocket {
     private onRegister(data: Buffer) {
         let type = data.readUInt8(0);
         if (type === define.Client_To_Server.handshake) {        // shake hands
-            this.handshake();
+            this.handshake(data);
         } else {
             this.close();
         }
@@ -124,6 +134,7 @@ class ClientSocket implements I_clientSocket {
         this.connector.nowConnectionNum--;
         clearTimeout(this.registerTimer);
         clearTimeout(this.heartbeatTimer);
+        this.heartbeatTimer = null as any;
         clearInterval(this.sendTimer);
         this.sendArr = [];
         this.clientManager.removeClient(this);
@@ -132,13 +143,22 @@ class ClientSocket implements I_clientSocket {
     /**
      * shake hands
      */
-    private handshake() {
-        if (this.handshakeOver) {
+    private handshake(data: Buffer) {
+        let msg: { "md5": string } = null as any;
+        try {
+            msg = JSON.parse(data.slice(1).toString());
+        } catch (e) {
+        }
+        if (!msg) {
             this.close();
             return;
         }
-        this.handshakeOver = true;
-        this.send(this.connector.handshakeBuf);
+        if (msg.md5 === this.connector.md5) {
+            this.send(this.connector.handshakeBuf);
+        } else {
+            this.send(this.connector.handshakeBufAll);
+        }
+
         clearTimeout(this.registerTimer);
         this.heartbeat();
         this.clientManager.addClient(this);
@@ -156,10 +176,13 @@ class ClientSocket implements I_clientSocket {
         if (this.connector.heartbeatTime === 0) {
             return;
         }
-        clearTimeout(this.heartbeatTimer);
-        this.heartbeatTimer = setTimeout(() => {
-            this.close();
-        }, this.connector.heartbeatTime * 2);
+        if (this.heartbeatTimer) {
+            this.heartbeatTimer.refresh();
+        } else {
+            this.heartbeatTimer = setTimeout(() => {
+                this.close();
+            }, this.connector.heartbeatTime * 2);
+        }
     }
 
     /**
@@ -191,6 +214,7 @@ class ClientSocket implements I_clientSocket {
      * close
      */
     close() {
+        this.sendInterval()
         this.socket.close();
     }
 }

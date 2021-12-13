@@ -10,7 +10,8 @@ import * as rpcServer from "../components/rpcServer";
 import * as rpcService from "../components/rpcService";
 import { FrontendServer } from "../components/frontendServer";
 import { BackendServer } from "../components/backendServer";
-import { ServerInfo } from "../..";
+import { ServerInfo } from "./interfaceDefine";
+import { msgCoderSetApp } from "../components/msgCoder";
 
 
 /**
@@ -30,6 +31,7 @@ export function defaultConfiguration(app: Application) {
  */
 export function startServer(app: Application) {
     startPng(app);
+    msgCoderSetApp(app);
     if (app.serverType === "master") {
         master.start(app);
     } else if (app.frontend) {
@@ -107,6 +109,12 @@ let loadBaseConfig = function (app: Application) {
             }
             if (key === "serversConfig") {
                 parseServersConfig(file);
+            } else if (key === "routeConfig") {
+                let arr: string[][] = [];
+                for (let one of file) {
+                    arr.push((one as string).split("."));
+                }
+                app.routeConfig2 = arr;
             }
 
             app[key] = file;
@@ -153,7 +161,8 @@ let processArgs = function (app: Application, args: any) {
     app.serverId = args.id || app.masterConfig.id;
     app.isDaemon = !!args.isDaemon;
     if (app.serverId === app.masterConfig.id) {
-        app.serverInfo = app.masterConfig;
+        app.serverInfo = JSON.parse(JSON.stringify(app.masterConfig));
+        (app.serverInfo as any).serverType = "master";
         app.serverType = "master";
         app.startMode = startAlone ? "alone" : "all";
     } else {
@@ -203,7 +212,6 @@ function startPng(app: Application) {
     let version = require("../mydog").version;
     version = "Ver: " + version;
     console.log("      ");
-    console.log("      ");
     for (let i = 0; i < lines.length; i++) {
         if (i === 5) {
             let j;
@@ -218,6 +226,5 @@ function startPng(app: Application) {
         }
         console.log(lines[i]);
     }
-    console.log("  ");
     console.log("  ");
 }

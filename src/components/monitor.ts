@@ -7,10 +7,9 @@ import Application from "../application";
 import { MonitorCli } from "./cliUtil";
 import { TcpClient } from "./tcpClient";
 import define = require("../util/define");
-import { SocketProxy, monitor_get_new_server, monitor_remove_server, loggerType, monitor_reg_master } from "../util/interfaceDefine";
+import { SocketProxy, monitor_get_new_server, monitor_remove_server, loggerLevel, monitor_reg_master, ServerInfo, loggerType } from "../util/interfaceDefine";
 import { encodeInnerData } from "./msgCoder";
 import * as rpcClient from "./rpcClient";
-import { ServerInfo } from "../..";
 
 
 export function start(_app: Application) {
@@ -42,7 +41,7 @@ export class monitor_client_proxy {
         let self = this;
         setTimeout(function () {
             let connectCb = function () {
-                self.app.logger(loggerType.info, "monitor -> connected to master success");
+                self.app.logger(loggerType.frame, loggerLevel.info, "monitor -> connected to master success");
 
                 // Register with the master
                 self.register();
@@ -50,7 +49,7 @@ export class monitor_client_proxy {
                 // Heartbeat package
                 self.heartbeat();;
             };
-            self.app.logger(loggerType.info, "monitor -> try to connect to master now");
+            self.app.logger(loggerType.frame, loggerLevel.info, "monitor -> try to connect to master now");
             self.socket = new TcpClient(self.app.masterConfig.port, self.app.masterConfig.host, define.some_config.SocketBufferMaxLen, false, connectCb);
             self.socket.on("data", self.onData.bind(self));
             self.socket.on("close", self.onClose.bind(self));
@@ -94,7 +93,7 @@ export class monitor_client_proxy {
      * closed
      */
     private onClose() {
-        this.app.logger(loggerType.error, "monitor -> socket closed, try to reconnect master later");
+        this.app.logger(loggerType.frame, loggerLevel.error, "monitor -> socket closed, try to reconnect master later");
         this.needDiff = true;
         this.removeDiffServers = {};
         clearTimeout(this.diffTimer);
@@ -108,13 +107,12 @@ export class monitor_client_proxy {
      * Send heartbeat
      */
     private heartbeat() {
-        let self = this;
         let timeDelay = define.some_config.Time.Monitor_Heart_Beat_Time * 1000 - 5000 + Math.floor(5000 * Math.random());
-        this.heartbeatTimer = setTimeout(function () {
+        this.heartbeatTimer = setTimeout(() => {
             let heartbeatMsg = { "T": define.Monitor_To_Master.heartbeat };
-            self.send(heartbeatMsg);
-            self.heartbeatTimeout();
-            self.heartbeat();
+            this.send(heartbeatMsg);
+            this.heartbeatTimeout();
+            this.heartbeatTimer.refresh();
         }, timeDelay)
     }
 
@@ -127,7 +125,7 @@ export class monitor_client_proxy {
         }
         let self = this;
         this.heartbeatTimeoutTimer = setTimeout(function () {
-            self.app.logger(loggerType.error, "monitor -> heartbeat timeout, close the socket");
+            self.app.logger(loggerType.frame, loggerLevel.error, "monitor -> heartbeat timeout, close the socket");
             self.socket.close();
         }, define.some_config.Time.Monitor_Heart_Beat_Timeout_Time * 1000)
     }
@@ -166,14 +164,14 @@ export class monitor_client_proxy {
                     if (serversApp[serverInfo.serverType][i].id === tmpServer.id) {
                         serversApp[serverInfo.serverType].splice(i, 1);
                         rpcClient.removeSocket(tmpServer.id);
-                        this.emitRemoveServer(serverInfo.serverType, tmpServer.id);
+                        this.emitRemoveServer(tmpServer);
                         break;
                     }
                 }
             }
             serversApp[serverInfo.serverType].push(serverInfo);
             serversIdMap[serverInfo.id] = serverInfo;
-            this.emitAddServer(serverInfo.serverType, serverInfo.id);
+            this.emitAddServer(serverInfo);
             rpcClient.ifCreateRpcClient(this.app, serverInfo)
         }
     }
@@ -191,9 +189,10 @@ export class monitor_client_proxy {
         if (serversApp[msg.serverType]) {
             for (let i = 0; i < serversApp[msg.serverType].length; i++) {
                 if (serversApp[msg.serverType][i].id === msg.id) {
+                    let tmpInfo = serversApp[msg.serverType][i];
                     serversApp[msg.serverType].splice(i, 1);
                     rpcClient.removeSocket(msg.id)
-                    this.emitRemoveServer(msg.serverType, msg.id);
+                    this.emitRemoveServer(tmpInfo);
                     break;
                 }
             }
@@ -236,10 +235,11 @@ export class monitor_client_proxy {
                     continue;
                 }
                 if (!this.removeDiffServers[id]) {
+                    let tmpInfo = this.app.serversIdMap[id];
                     delete this.app.serversIdMap[id];
                     servers[serverType].splice(i, 1);
                     rpcClient.removeSocket(id);
-                    this.emitRemoveServer(serverType, id);
+                    this.emitRemoveServer(tmpInfo);
                 }
             }
         }
@@ -249,18 +249,18 @@ export class monitor_client_proxy {
     /**
      * Launch add server event
      */
-    private emitAddServer(serverType: string, id: string) {
+    private emitAddServer(serverInfo: ServerInfo) {
         process.nextTick(() => {
-            this.app.emit("onAddServer", serverType, id);
+            this.app.emit("onAddServer", serverInfo);
         });
     }
 
     /**
      * Launch remove server event
      */
-    private emitRemoveServer(serverType: string, id: string) {
+    private emitRemoveServer(serverInfo: ServerInfo) {
         process.nextTick(() => {
-            this.app.emit("onRemoveServer", serverType, id);
+            this.app.emit("onRemoveServer", serverInfo);
         });
     }
 }

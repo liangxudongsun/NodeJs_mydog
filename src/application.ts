@@ -4,13 +4,12 @@
 
 
 import * as path from "path"
-import { I_someConfig, loggerType, I_clientSocket } from "./util/interfaceDefine";
+import { I_someConfig, loggerType, I_clientSocket, I_connectorConfig, I_encodeDecodeConfig, I_rpcConfig, ServerInfo, loggerLevel } from "./util/interfaceDefine";
 import * as appUtil from "./util/appUtil";
 import { EventEmitter } from "events";
 import { RpcSocketPool } from "./components/rpcSocketPool";
 import { FrontendServer } from "./components/frontendServer";
 import { BackendServer } from "./components/backendServer";
-import { I_connectorConfig, I_encodeDecodeConfig, I_rpcConfig, ServerInfo } from "..";
 import { Session } from "./components/session";
 
 declare global {
@@ -27,6 +26,7 @@ export default class Application extends EventEmitter {
     routeConfig: string[] = [];                                                              // route.ts
     masterConfig: ServerInfo = {} as ServerInfo;                                             // master.ts
     serversConfig: { [serverType: string]: ServerInfo[] } = {};                              // servers.ts
+    routeConfig2: string[][] = [];                                                           // route.ts  (split)
 
     clientNum: number = 0;                                                                   // Number of all socket connections
     clients: { [uid: number]: I_clientSocket } = {};                                         // Sockets that have been binded
@@ -46,9 +46,10 @@ export default class Application extends EventEmitter {
 
     router: { [serverType: string]: (session: Session) => string } = {};                     // Pre-selection when routing messages to the backend
     rpc: (serverId: string) => Rpc = null as any;                                            // Rpc packaging
+    rpcAwait: (serverId: string, notify: boolean) => Rpc = null as any;                      // Rpc await packaging
     rpcPool: RpcSocketPool = new RpcSocketPool();                                            // Rpc socket pool
 
-    logger: (level: loggerType, msg: string) => void = function () { };                      // Internal log output port
+    logger: (type: loggerType, level: loggerLevel, msg: string) => void = function () { };                      // Internal msg log output
 
     msgEncode: Required<I_encodeDecodeConfig>["msgEncode"] = null as any;
     msgDecode: Required<I_encodeDecodeConfig>["msgDecode"] = null as any;
@@ -79,13 +80,6 @@ export default class Application extends EventEmitter {
     }
 
 
-    setConfig(key: "rpc", value: I_rpcConfig): void
-    setConfig(key: "connector", value: I_connectorConfig): void
-    setConfig(key: "encodeDecode", value: Partial<I_encodeDecodeConfig>): void
-    setConfig(key: "ssh", value: string[]): void
-    setConfig(key: "recognizeToken", value: { "serverToken"?: string, "cliToken"?: string }): void
-    setConfig(key: "logger", value: (level: loggerType, msg: string) => void): void
-    setConfig(key: "mydogList", value: () => { "title": string, "value": string }[]): void
     setConfig(key: keyof I_someConfig, value: any): void {
         this.someconfig[key] = value;
         if (key === "logger") {
@@ -148,30 +142,22 @@ export default class Application extends EventEmitter {
     }
 
     /**
-     * Is there a bound client
+     * get session by uid
      */
-    hasClient(uid: number) {
-        return !!this.clients[uid];
-    }
-
-    /**
-     * Close the bound client
-     */
-    closeClient(uid: number) {
+    getSession(uid: number) {
         let client = this.clients[uid];
         if (client) {
-            client.close();
+            return client.session;
+        } else {
+            return null;
         }
     }
 
     /**
-     * Configure part of the session
+     * get all clients
      */
-    applySession(uid: number, some: { [key: string]: any }) {
-        let client = this.clients[uid];
-        if (client) {
-            client.session.set(some);
-        }
+    getAllClients() {
+        return this.clients;
     }
 
     /**

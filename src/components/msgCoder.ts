@@ -1,6 +1,12 @@
 
+import Application from "../application";
 import define = require("../util/define");
-import { SocketProxy } from "../util/interfaceDefine";
+import { loggerLevel, loggerType, SocketProxy } from "../util/interfaceDefine";
+
+let app: Application = null as any;
+export function msgCoderSetApp(_app: Application) {
+    app = _app;
+}
 
 /**
  * Unpack
@@ -8,19 +14,27 @@ import { SocketProxy } from "../util/interfaceDefine";
 export function decode(socket: SocketProxy, msg: Buffer) {
     let readLen = 0;
     while (readLen < msg.length) {
-        if (socket.len === 0) //data length is unknown
+        if (socket.len === 0) // data length is unknown
         {
-            socket.buffer = Buffer.concat([socket.buffer, Buffer.from([msg[readLen]])]);
-            if (socket.buffer.length === 4) {
-                socket.len = socket.buffer.readUInt32BE(0);
+            socket.headBuf[socket.headLen] = msg[readLen];
+            socket.headLen++;
+            readLen++;
+            if (socket.headLen === 4) {
+                socket.len = socket.headBuf.readUInt32BE(0);
                 if (socket.len > socket.maxLen || socket.len === 0) {
+                    app.logger(loggerType.frame, loggerLevel.error, "socket data length is longer then " + socket.maxLen + ", close it, " + socket.remoteAddress);
                     socket.close();
-                    throw new Error("socket data length is longer then " + socket.maxLen + ", close it, " + socket.remoteAddress);
                     return;
                 }
-                socket.buffer = Buffer.allocUnsafe(socket.len);
+                if (msg.length - readLen >= socket.len) { // data coming all
+                    socket.emit("data", msg.slice(readLen, readLen + socket.len));
+                    readLen += socket.len;
+                    socket.len = 0;
+                    socket.headLen = 0;
+                } else {
+                    socket.buffer = Buffer.allocUnsafe(socket.len);
+                }
             }
-            readLen++;
         }
         else if (msg.length - readLen < socket.len)	// data not coming all
         {
@@ -28,16 +42,13 @@ export function decode(socket: SocketProxy, msg: Buffer) {
             socket.len -= (msg.length - readLen);
             readLen = msg.length;
         }
-        else {
+        else { // data coming all
             msg.copy(socket.buffer, socket.buffer.length - socket.len, readLen, readLen + socket.len);
-
+            socket.emit("data", socket.buffer);
             readLen += socket.len;
             socket.len = 0;
-            let data = socket.buffer;
-            socket.buffer = Buffer.allocUnsafe(0);
-
-            //data coming all
-            socket.emit("data", data);
+            socket.headLen = 0;
+            socket.buffer = null as any;
         }
     }
 }
@@ -65,12 +76,14 @@ export function encodeInnerData(data: any) {
  */
 
 export function encodeRemoteData(uids: number[], dataBuf: Buffer) {
-    let uidsBuf = Buffer.from(JSON.stringify(uids));
-    let buf = Buffer.allocUnsafe(7 + uidsBuf.length + dataBuf.length);
-    buf.writeUInt32BE(3 + uidsBuf.length + dataBuf.length, 0);
+    let uidsLen = uids.length * 4;
+    let buf = Buffer.allocUnsafe(7 + uidsLen + dataBuf.length);
+    buf.writeUInt32BE(3 + uidsLen + dataBuf.length, 0);
     buf.writeUInt8(define.Rpc_Msg.clientMsgOut, 4);
-    buf.writeUInt16BE(uidsBuf.length, 5);
-    uidsBuf.copy(buf, 7);
-    dataBuf.copy(buf, 7 + uidsBuf.length);
+    buf.writeUInt16BE(uids.length, 5);
+    for (let i = 0; i < uids.length; i++) {
+        buf.writeUInt32BE(uids[i], 7 + i * 4);
+    }
+    dataBuf.copy(buf, 7 + uidsLen);
     return buf;
 }

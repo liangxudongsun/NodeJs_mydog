@@ -3,10 +3,9 @@ import Application from "../application";
 import define = require("../util/define");
 import * as path from "path";
 import * as fs from "fs";
-import { loggerType, sessionCopyJson, I_clientSocket, I_clientManager, I_connectorConstructor } from "../util/interfaceDefine";
+import { loggerType, sessionCopyJson, I_clientSocket, I_clientManager, I_connectorConstructor, I_encodeDecodeConfig, loggerLevel } from "../util/interfaceDefine";
 import { Session, initSessionApp } from "./session";
 import * as protocol from "../connector/protocol";
-import * as indexDts from "../..";
 
 export class FrontendServer {
     private app: Application;
@@ -21,14 +20,14 @@ export class FrontendServer {
         let startCb = function () {
             let str = `listening at [${self.app.serverInfo.host}:${self.app.serverInfo.clientPort}]  ${self.app.serverId} (clientPort)`;
             console.log(str);
-            self.app.logger(loggerType.info, str);
+            self.app.logger(loggerType.frame, loggerLevel.info, str);
             cb && cb();
         };
         protocol.init(this.app);
-        let mydog: typeof indexDts = require("../mydog");
+        let mydog = require("../mydog");
         let connectorConfig = this.app.someconfig.connector || {};
-        let connectorConstructor: I_connectorConstructor = connectorConfig.connector as any || mydog.connector.connectorTcp;
-        let defaultEncodeDecode: Required<indexDts.I_encodeDecodeConfig> = protocol.default_encodeDecode;
+        let connectorConstructor: I_connectorConstructor = connectorConfig.connector as any || mydog.connector.Tcp;
+        let defaultEncodeDecode: Required<I_encodeDecodeConfig> = protocol.default_encodeDecode;
         let encodeDecodeConfig = this.app.someconfig.encodeDecode || {};
         this.app.protoEncode = encodeDecodeConfig.protoEncode || defaultEncodeDecode.protoEncode;
         this.app.msgEncode = encodeDecodeConfig.msgEncode || defaultEncodeDecode.msgEncode;
@@ -57,14 +56,13 @@ export class FrontendServer {
      * The front-end server forwards the message of the back-end server to the client
      */
     sendMsgByUids(data: Buffer) {
-        let uidBuffLen = data.readUInt16BE(1);
-        let uids = JSON.parse(data.slice(3, 3 + uidBuffLen).toString());
-        let msgBuf = data.slice(3 + uidBuffLen);
+        let uidsLen = data.readUInt16BE(1);
+        let msgBuf = data.slice(3 + uidsLen * 4);
         let clients = this.app.clients;
         let client: I_clientSocket;
         let i: number;
-        for (i = 0; i < uids.length; i++) {
-            client = clients[uids[i]];
+        for (i = 0; i < uidsLen; i++) {
+            client = clients[data.readUInt32BE(3 + i * 4)];
             if (client) {
                 client.send(msgBuf);
             }
@@ -82,8 +80,8 @@ class ClientManager implements I_clientManager {
     private msgHandler: { [filename: string]: any } = {};
     private serverType: string = "";
     private router: { [serverType: string]: (session: Session) => string };
-    private clientOnCb: (session: indexDts.Session) => void = null as any;
-    private clientOffCb: (session: indexDts.Session) => void = null as any;
+    private clientOnCb: (session: Session) => void = null as any;
+    private clientOffCb: (session: Session) => void = null as any;
     private cmdFilter: (session: Session, cmd: number) => boolean = null as any;
     constructor(app: Application) {
         this.app = app;
@@ -120,7 +118,7 @@ class ClientManager implements I_clientManager {
 
     addClient(client: I_clientSocket) {
         if (client.session) {
-            this.app.logger(loggerType.warn, "frontendServer -> the I_client has already been added, close it");
+            this.app.logger(loggerType.frame, loggerLevel.warn, "frontendServer -> the I_client has already been added, close it");
             client.close();
             return;
         }
@@ -149,23 +147,23 @@ class ClientManager implements I_clientManager {
     handleMsg(client: I_clientSocket, msgBuf: Buffer) {
         try {
             if (!client.session) {
-                this.app.logger(loggerType.warn, "frontendServer -> cannot handle msg before added, close it");
+                this.app.logger(loggerType.frame, loggerLevel.warn, "frontendServer -> cannot handle msg before added, close it");
                 client.close();
                 return;
             }
             let data = this.app.protoDecode(msgBuf);
-            let cmdArr = this.app.routeConfig[data.cmd].split('.');
             if (this.cmdFilter && this.cmdFilter(client.session, data.cmd)) {
                 return;
             }
+            let cmdArr = this.app.routeConfig2[data.cmd];
             if (this.serverType === cmdArr[0]) {
                 let msg = this.app.msgDecode(data.cmd, data.msg);
                 this.msgHandler[cmdArr[1]][cmdArr[2]](msg, client.session, this.callBack(client, data.cmd));
             } else {
                 this.doRemote(data, client.session, cmdArr);
             }
-        } catch (e) {
-            this.app.logger(loggerType.error, e.stack);
+        } catch (e: any) {
+            this.app.logger(loggerType.msg, loggerLevel.error, e.stack);
         }
     }
 
@@ -194,7 +192,7 @@ class ClientManager implements I_clientManager {
         }
         let svr = this.app.serversIdMap[id];
         if (svr.serverType !== cmdArr[0] || svr.frontend) {
-            this.app.logger(loggerType.warn, "frontendServer -> illegal remote");
+            this.app.logger(loggerType.msg, loggerLevel.warn, "frontendServer -> illegal remote");
             return;
         }
         let sessionBuf = session.sessionBuf;

@@ -1,9 +1,8 @@
 import Application from "../application";
-import { SocketProxy, loggerType } from "../util/interfaceDefine";
+import { SocketProxy, loggerLevel, ServerInfo, loggerType } from "../util/interfaceDefine";
 import { TcpClient } from "../components/tcpClient";
 import * as define from "../util/define";
 import * as rpcService from "./rpcService";
-import { ServerInfo } from "../..";
 import * as appUtil from "../util/appUtil";
 
 /**
@@ -78,7 +77,7 @@ export class RpcClientSocket {
         let self = this;
         this.connectTimer = setTimeout(() => {
             let connectCb = function () {
-                self.app.logger(loggerType.info, `rpcClient -> connect to rpc server success: ${self.id}`);
+                self.app.logger(loggerType.frame, loggerLevel.info, `rpcClient -> connect to rpc server success: ${self.id}`);
 
                 // register
                 let registerBuf = Buffer.from(JSON.stringify({
@@ -101,7 +100,7 @@ export class RpcClientSocket {
             self.socket = new TcpClient(self.port, self.host, rpcConfig.maxLen || define.some_config.SocketBufferMaxLen, noDelay, connectCb);
             self.socket.on("data", self.onData.bind(self));
             self.socket.on("close", self.onClose.bind(self));
-            self.app.logger(loggerType.info, `rpcClient -> try to connect to rpc server: ${self.id}`);
+            self.app.logger(loggerType.frame, loggerLevel.info, `rpcClient -> try to connect to rpc server: ${self.id}`);
         }, delay);
     }
 
@@ -114,7 +113,7 @@ export class RpcClientSocket {
         this.sendArr = [];
         this.heartbeatTimeoutTimer = null as any;
         this.socket = null as any;
-        this.app.logger(loggerType.error, `rpcClient -> socket closed, reconnect the rpc server later: ${this.id}`);
+        this.app.logger(loggerType.frame, loggerLevel.error, `rpcClient -> socket closed, reconnect the rpc server later: ${this.id}`);
         let rpcConfig = this.app.someconfig.rpc || {};
         let delay = rpcConfig.reconnectDelay || define.some_config.Time.Rpc_Reconnect_Time;
         this.doConnect(delay * 1000);
@@ -124,20 +123,20 @@ export class RpcClientSocket {
      * Send heartbeat at regular intervals
      */
     private heartbeatSend() {
-        let self = this;
+
         let rpcConfig = this.app.someconfig.rpc || {};
         let heartbeat = rpcConfig.heartbeat || define.some_config.Time.Rpc_Heart_Beat_Time;
         let timeDelay = heartbeat * 1000 - 5000 + Math.floor(5000 * Math.random());
         if (timeDelay < 5000) {
             timeDelay = 5000;
         }
-        this.heartbeatTimer = setTimeout(function () {
+        this.heartbeatTimer = setTimeout(() => {
             let buf = Buffer.allocUnsafe(5);
             buf.writeUInt32BE(1, 0);
             buf.writeUInt8(define.Rpc_Msg.heartbeat, 4);
-            self.socket.send(buf);
-            self.heartbeatTimeoutStart();
-            self.heartbeatSend();
+            this.socket.send(buf);
+            this.heartbeatTimeoutStart();
+            this.heartbeatTimer.refresh();
         }, timeDelay);
     }
 
@@ -158,7 +157,7 @@ export class RpcClientSocket {
         }
         let self = this;
         this.heartbeatTimeoutTimer = setTimeout(function () {
-            self.app.logger(loggerType.error, `rpcClient -> heartbeat timeout, close the rpc socket: ${self.id}`);
+            self.app.logger(loggerType.frame, loggerLevel.error, `rpcClient -> heartbeat timeout, close the rpc socket: ${self.id}`);
             self.socket.close();
         }, define.some_config.Time.Rpc_Heart_Beat_Timeout_Time * 1000);
 
@@ -176,6 +175,9 @@ export class RpcClientSocket {
             else if (type === define.Rpc_Msg.rpcMsg) {
                 rpcService.handleMsg(this.id, data);
             }
+            else if (type === define.Rpc_Msg.rpcMsgAwait) {
+                rpcService.handleMsgAwait(this.id, data);
+            }
             else if (type === define.Rpc_Msg.applySession) {
                 this.app.frontendServer.applySession(data);
             }
@@ -185,8 +187,8 @@ export class RpcClientSocket {
             else if (type === define.Rpc_Msg.heartbeat) {
                 this.heartbeatResponse();
             }
-        } catch (e) {
-            this.app.logger(loggerType.error, e.stack);
+        } catch (e: any) {
+            this.app.logger(loggerType.msg, loggerLevel.error, e.stack);
         }
     }
 

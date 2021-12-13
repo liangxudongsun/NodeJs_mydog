@@ -6,7 +6,6 @@ import * as readline from "readline";
 import { spawn } from "child_process";
 import * as define from "./util/define";
 import * as msgCoder from "./components/msgCoder";
-import program = require("commander");
 import { TcpClient } from "./components/tcpClient";
 
 let version = require('../package.json').version;
@@ -21,6 +20,8 @@ class clientProxy {
     socket: TcpClient;
     token: string;
     connect_cb: Function;
+    private needAbort = true;
+    private heartbeatTimeout: NodeJS.Timeout = null as any;
     constructor(host: string, port: number, token: string, cb: Function) {
         this.token = token;
         this.connect_cb = cb;
@@ -39,7 +40,10 @@ class clientProxy {
         });
 
         this.socket.on("close", (err: any) => {
-            abort(err);
+            clearTimeout(this.heartbeatTimeout);
+            if (this.needAbort) {
+                abort(err);
+            }
         });
     }
 
@@ -57,7 +61,7 @@ class clientProxy {
 
     private heartbeat() {
         let self = this;
-        setTimeout(function () {
+        this.heartbeatTimeout = setTimeout(function () {
             let heartBeatMsg = { T: define.Cli_To_Master.heartbeat };
             let heartBeatMsg_buf = msgCoder.encodeInnerData(heartBeatMsg);
             self.socket.send(heartBeatMsg_buf);
@@ -65,7 +69,7 @@ class clientProxy {
         }, define.some_config.Time.Monitor_Heart_Beat_Time * 1000)
     }
 
-    request(msg: any, cb: (err: string, ...args: any[]) => void) {
+    request(msg: any, timeout: number, cb: (err: string, ...args: any[]) => void) {
         let reqId = this.reqId++;
         let data = { "T": define.Cli_To_Master.cliMsg, "reqId": reqId, "msg": msg };
         let buf = msgCoder.encodeInnerData(data);
@@ -77,92 +81,399 @@ class clientProxy {
             "timeOut": setTimeout(function () {
                 delete self.reqs[reqId];
                 cb("time out");
-            }, 10 * 1000)
+            }, timeout * 1000)
         };
 
     }
 
-    close() {
-        abort();
+    close(needAbort = true) {
+        this.needAbort = needAbort;
+        this.socket.close();
     }
 }
 
 
-program.version(version);
+class Commond {
+    private baseName: string = "";
+    private ver: string = "";
+    private cmdArr: I_commond[] = [];
+    setNameVersion(baseName: string, ver: string) {
+        this.baseName = baseName;
+        this.ver = ver;
+    }
+    addCommond(cmd: I_commond) {
+        for (let one of this.cmdArr) {
+            if (one.name === cmd.name) {
+                console.log(`\n   Error: [Cmd already exists] cmd -> ${cmd.name}\n`);
+                process.exit();
+            }
+        }
+        for (let i = 0; i < cmd.options.length; i++) {
+            let one = cmd.options[i];
+            for (let j = i + 1; j < cmd.options.length; j++) {
+                let two = cmd.options[j];
+                if (two.opt === one.opt) {
+                    console.log(`\n   Error: [Option.opt already exists] cmd -> ${cmd.name}, opt -> ${one.opt}\n`);
+                    process.exit();
+                }
+                if (two.name === one.name) {
+                    console.log(`\n   Error: [Option.name already exists] cmd -> ${cmd.name}, name -> ${one.name}\n`);
+                    process.exit();
+                }
+            }
+        }
+        this.cmdArr.push(cmd);
+    }
 
-program.command('init')
-    .description('create a new application')
-    .action(function () {
+    parse() {
+        let argvArr = [...process.argv];
+        argvArr.splice(0, 2);
+        if (!argvArr.length) {
+            this.print_help();
+            return;
+        }
+        let cmdName = argvArr[0];
+        if (["-h", "-H", "--help"].includes(cmdName)) {
+            this.print_help();
+            return;
+        }
+        if (["-v", "-V", "--version"].includes(cmdName)) {
+            console.log(`\n   Version: ${this.ver}\n`);
+            return;
+        }
+        if (cmdName === "des") {
+            this.print_des(argvArr[1]);
+            return;
+        }
+        this.parseCmd(cmdName, argvArr);
+    }
+
+    private parseCmd(cmdName: string, argvArr: string[]) {
+        let cmd: I_commond = null as any;
+        for (let one of this.cmdArr) {
+            if (one.name === cmdName) {
+                cmd = one;
+                break;
+            }
+        }
+        if (!cmd) {
+            console.log(`\n   Error: [Cmd not exists] ${cmdName}\n`);
+            return;
+        }
+        if (argvArr.includes("--help")) {
+            this.print_des(cmdName);
+            return;
+        }
+        let keyDic: { [key: string]: any } = {};
+        let otherArr: string[] = [];
+        for (let i = 1; i < argvArr.length;) {
+            let str = argvArr[i];
+            if (!str.startsWith("-")) {
+                otherArr.push(str);
+                i += 1;
+                continue;
+            }
+            let option: I_option = null as any;
+            for (let one of cmd.options) {
+                if (one.opt === str) {
+                    option = one;
+                    break;
+                }
+            }
+            if (!option) {
+                console.log(`\n   Error: [No such option] ${str}\n`);
+                process.exit();
+            }
+            if (option.type === "bool") {
+                keyDic[option.name] = true;
+                i += 1;
+                continue;
+            }
+            if (option.type === "string") {
+                let str2 = argvArr[i + 1];
+                if (!str2 || str2.startsWith("-")) {
+                    console.log(`\n   Error: [Wrong option input] ${str} ${str2 || ""}\n`);
+                    process.exit();
+                }
+                keyDic[option.name] = str2;
+                i += 2;
+                continue;
+            }
+            if (option.type === "number") {
+                let str2 = argvArr[i + 1];
+                if (!str2 || str2.startsWith("-")) {
+                    console.log(`\n   Error: [Wrong option input] ${str} ${str2 || ""}\n`);
+                    process.exit();
+                }
+                let numVal = Number(str2);
+                if (isNaN(numVal)) {
+                    console.log(`\n   Error: [Wrong option input] ${str} ${str2 || ""}\n`);
+                    process.exit();
+                }
+                keyDic[option.name] = numVal;
+                i += 2;
+                continue;
+            }
+        }
+
+        for (let one of cmd.options) {
+            if (keyDic[one.name] !== undefined) {
+                continue;
+            }
+            if (one.type === "bool") {
+                continue;
+            }
+            if (one.mustNeed) {
+                console.log(`\n   Error: [Need option] ${one.opt}\n`);
+                process.exit();
+            } else if (one.default !== undefined) {
+                keyDic[one.name] = one.default;
+            }
+        }
+        cmd.cb(keyDic, otherArr);
+    }
+
+    private print_help() {
+        console.log("");
+        console.log(` Version: ${this.ver}`);
+        console.log(" Usage:")
+        let defaultArr: string[][] = [];
+        defaultArr.push(["-v", "show the version"]);
+        defaultArr.push(["-h", "list the commonds"]);
+        defaultArr.push(["des [command]", "describe the command"]);
+        this.printArr(defaultArr);
+
+        console.log("\n Commands:");
+        let arr: string[][] = [];
+        for (let one of this.cmdArr) {
+            arr.push([one.name + (one.options.length ? " [options]" : ""), one.des]);
+        }
+        this.printArr(arr);
+        console.log("");
+    }
+
+    private print_des(cmdName: string) {
+        let cmd: I_commond = null as any;
+        for (let one of this.cmdArr) {
+            if (one.name === cmdName) {
+                cmd = one;
+                break;
+            }
+        }
+        if (!cmd) {
+            console.log(`\n   Error: [Cmd not exists] cmd -> ${cmdName}\n`);
+            return;
+        }
+        console.log(``);
+        console.log(` Cmd: ${this.baseName} ${cmd.name}`);
+        console.log(` Des: ${cmd.des}`);
+        if (cmd.usage) {
+            console.log(` Usage: ${cmd.usage}`);
+        }
+        console.log(` Options:`);
+
+        let arr: string[][] = [];
+        for (let one of cmd.options) {
+            let tmpDes = one.des;
+            if (!one.mustNeed && one.type !== "bool" && one.default !== undefined) {
+                if (one.type === "string") {
+                    tmpDes += ` (default: "${one.default}")`;
+                } else {
+                    tmpDes += ` (default: ${one.default})`;
+                }
+            }
+            arr.push([one.opt, one.type === "bool" ? "" : `${one.name} [${one.type}]`, tmpDes, one.mustNeed ? "√" : ""])
+        }
+        this.printArr(arr);
+        console.log("");
+    }
+
+
+    private printArr(arr: string[][]) {
+        let widthArr: number[][] = [];
+        let maxWidthArr: number[] = [];
+        for (let i = 0; i < arr.length; i++) {
+            let one = arr[i];
+            let tmpArr: number[] = [];
+            for (let j = 0; j < one.length; j++) {
+                let len = this.getDisplayLength(one[j]);
+                tmpArr.push(len);
+                if (len >= (maxWidthArr[j] || 0)) {
+                    maxWidthArr[j] = len;
+                }
+            }
+            widthArr.push(tmpArr);
+        }
+        for (let i = 0; i < maxWidthArr.length; i++) {
+            maxWidthArr[i] += 5;
+        }
+        for (let i = 0; i < arr.length; i++) {
+            for (let j = 0; j < arr[i].length; j++) {
+                arr[i][j] += " ".repeat(maxWidthArr[j] - widthArr[i][j]);
+            }
+            console.log("   ", arr[i].join(""));
+        }
+
+    }
+
+    private getDisplayLength(str: string) {
+        let realLength = 0, len = str.length, charCode = -1;
+        for (var i = 0; i < len; i++) {
+            charCode = str.charCodeAt(i);
+            if (charCode >= 0 && charCode <= 128) {
+                realLength += 1;
+            } else {
+                realLength += 2;
+            }
+
+        }
+        return realLength;
+    }
+}
+
+
+interface I_commond {
+    /** 名称 */
+    "name": string,
+    /** 描述 */
+    "des": string,
+    /** 选项 */
+    "options": I_option[],
+    /** 使用示例 */
+    "usage": string,
+    /** 回调 */
+    "cb": (opts: any, argv: string[]) => void
+}
+
+interface I_option {
+    /** 关键值（必须以"-"开头） */
+    "opt": string,
+    /** 名字 */
+    "name": string,
+    /** 描述 */
+    "des": string,
+    /** 是否是必选项 */
+    "mustNeed": boolean,
+    /** 类型 */
+    "type": "bool" | "string" | "number"
+    /** 默认值 */
+    "default"?: number | string,
+}
+
+let commond = new Commond();
+commond.setNameVersion("mydog", version);
+
+commond.addCommond({
+    "name": "init",
+    "des": "create a new application",
+    "options": [],
+    "usage": "",
+    "cb": () => {
         init();
-    });
+    }
+});
 
-program.command('start')
-    .description('start the application')
-    .option('-e, --env <environment>', 'the used environment', "development")
-    .option('-d, --daemon', 'enable the daemon start')
-    .action(function (opts) {
-        let args = [].slice.call(arguments, 0);
-        opts = args[args.length - 1];
-        opts.serverIds = args.slice(0, -1);
+commond.addCommond({
+    "name": "start",
+    "des": "start the application",
+    "options": [
+        { "opt": "-e", "name": "env", "des": "the used environment", "mustNeed": false, "type": "string", "default": "development" },
+        { "opt": "-d", "name": "daemon", "des": "enable the daemon start", "mustNeed": false, "type": "bool" },
+    ],
+    "usage": "mydog start -e env [serverId-1 ...]",
+    "cb": (opts: { "env": string, "daemon": boolean, "serverIds": string[] }, argv) => {
+        opts.serverIds = argv;
         start(opts);
-    });
+    }
+});
 
-program.command('list')
-    .description('list the servers')
-    .option('-h, --host <master-host>', 'master server host', DEFAULT_MASTER_HOST)
-    .option('-p, --port <master-port>', 'master server port', DEFAULT_MASTER_PORT)
-    .option('-t, --token <cli-token>', 'cli token', define.some_config.Cli_Token)
-    .option('-i, --interval <request-interval>', 'request-interval')
-    .action(function (opts) {
+commond.addCommond({
+    "name": "list",
+    "des": "list the servers",
+    "options": [
+        { "opt": "-h", "name": "host", "des": "master server host", "mustNeed": false, "type": "string", "default": DEFAULT_MASTER_HOST },
+        { "opt": "-p", "name": "port", "des": "master server port", "mustNeed": false, "type": "number", "default": DEFAULT_MASTER_PORT },
+        { "opt": "-t", "name": "token", "des": "cli token", "mustNeed": false, "type": "string", "default": define.some_config.Cli_Token },
+        { "opt": "-i", "name": "interval", "des": "request interval", "mustNeed": false, "type": "number", "default": 5 },
+    ],
+    "usage": "",
+    "cb": (opts: { "host": string, "port": number, "token": string, "interval": number }) => {
         list(opts);
-    });
+    }
+});
 
-program.command('stop')
-    .description('stop the servers')
-    .option('-h, --host <master-host>', 'master server host', DEFAULT_MASTER_HOST)
-    .option('-p, --port <master-port>', 'master server port', DEFAULT_MASTER_PORT)
-    .option('-t, --token <cli-token>', 'cli token', define.some_config.Cli_Token)
-    .action(function (opts) {
+commond.addCommond({
+    "name": "stop",
+    "des": "stop the servers",
+    "options": [
+        { "opt": "-h", "name": "host", "des": "master server host", "mustNeed": false, "type": "string", "default": DEFAULT_MASTER_HOST },
+        { "opt": "-p", "name": "port", "des": "master server port", "mustNeed": false, "type": "number", "default": DEFAULT_MASTER_PORT },
+        { "opt": "-t", "name": "token", "des": "cli token", "mustNeed": false, "type": "string", "default": define.some_config.Cli_Token },
+    ],
+    "usage": "",
+    "cb": (opts: { "host": string, "port": number, "token": string }) => {
         stop(opts);
-    });
+    }
+});
 
-
-program.command('remove')
-    .description('remove some servers')
-    .option('-h, --host <master-host>', 'master server host', DEFAULT_MASTER_HOST)
-    .option('-p, --port <master-port>', 'master server port', DEFAULT_MASTER_PORT)
-    .option('-t, --token <cli-token>', ' cli token', define.some_config.Cli_Token)
-    .action(function (opts) {
-        let args = [].slice.call(arguments, 0);
-        opts = args[args.length - 1];
-        opts.serverIds = args.slice(0, -1);
+commond.addCommond({
+    "name": "remove",
+    "des": "remove some servers",
+    "options": [
+        { "opt": "-h", "name": "host", "des": "master server host", "mustNeed": false, "type": "string", "default": DEFAULT_MASTER_HOST },
+        { "opt": "-p", "name": "port", "des": "master server port", "mustNeed": false, "type": "number", "default": DEFAULT_MASTER_PORT },
+        { "opt": "-t", "name": "token", "des": "cli token", "mustNeed": false, "type": "string", "default": define.some_config.Cli_Token },
+    ],
+    "usage": "mydog remove serverId-1 [serverId-2 ...]",
+    "cb": (opts: { "host": string, "port": number, "token": string, "serverIds": string[] }, argv) => {
+        opts.serverIds = argv;
         remove(opts);
-    });
+    }
+});
 
-program.command('removeT')
-    .description('remove some serverTypes')
-    .option('-h, --host <master-host>', 'master server host', DEFAULT_MASTER_HOST)
-    .option('-p, --port <master-port>', 'master server port', DEFAULT_MASTER_PORT)
-    .option('-t, --token <cli-token>', ' cli token', define.some_config.Cli_Token)
-    .action(function (opts) {
-        let args = [].slice.call(arguments, 0);
-        opts = args[args.length - 1];
-        opts.serverTypes = args.slice(0, -1);
+commond.addCommond({
+    "name": "removeT",
+    "des": "remove some serverTypes",
+    "options": [
+        { "opt": "-h", "name": "host", "des": "master server host", "mustNeed": false, "type": "string", "default": DEFAULT_MASTER_HOST },
+        { "opt": "-p", "name": "port", "des": "master server port", "mustNeed": false, "type": "number", "default": DEFAULT_MASTER_PORT },
+        { "opt": "-t", "name": "token", "des": "cli token", "mustNeed": false, "type": "string", "default": define.some_config.Cli_Token },
+    ],
+    "usage": "mydog removeT serverType-1 [serverType-2 ...]",
+    "cb": (opts: { "host": string, "port": number, "token": string, "serverTypes": string[] }, argv) => {
+        opts.serverTypes = argv;
         removeT(opts);
-    });
+    }
+});
 
-program.command('cmd')
-    .description('build cmd file')
-    .action(function () {
-        cmd();
-    });
+commond.addCommond({
+    "name": "cmd",
+    "des": "build cmd file",
+    "options": [],
+    "usage": "mydog cmd [ts cs ...]",
+    "cb": (opts, argv) => {
+        cmd(argv);
+    }
+});
 
-program.command('*')
-    .action(function () {
-        console.log('Illegal command format. Use `mydog --help` to get more info.\n');
-    });
+commond.addCommond({
+    "name": "send",
+    "des": "send msg to mydog",
+    "options": [
+        { "opt": "-h", "name": "host", "des": "master server host", "mustNeed": false, "type": "string", "default": DEFAULT_MASTER_HOST },
+        { "opt": "-p", "name": "port", "des": "master server port", "mustNeed": false, "type": "number", "default": DEFAULT_MASTER_PORT },
+        { "opt": "-t", "name": "token", "des": "cli token", "mustNeed": false, "type": "string", "default": define.some_config.Cli_Token },
+        { "opt": "-id", "name": "serverId", "des": "serverId will get msg", "mustNeed": false, "type": "string" },
+        { "opt": "-svrT", "name": "serverType", "des": "serverType will get msg", "mustNeed": false, "type": "string" },
+    ],
+    "usage": "mydog send [-id id1,id2] [-svrT svrT1,svrT2] [argv0 argv1...]",
+    "cb": (opts: { "host": string, "port": number, "token": string, "serverId": string, "serverType": string }, argv) => {
+        send(opts, argv);
+    }
+});
 
-program.parse(process.argv);
+
+commond.parse();
 
 
 
@@ -176,36 +487,17 @@ function init() {
     let pathStr = process.cwd();
     emptyDirectory(pathStr, function (empty) {
         if (empty) {
-            process.stdin.destroy();
             createApplicationAt(pathStr);
         } else {
-            confirm('Destination is not empty, continue? (y/n) [no] ', function (force) {
-                process.stdin.destroy();
+            confirm('Destination is not empty, continue? (y/n) [no]   ', function (force) {
                 if (force) {
                     createApplicationAt(pathStr);
                 } else {
-                    abort('Fail to init a project');
+                    abort('[ canceled ]');
                 }
             });
         }
     });
-
-    function confirm(msg: string, fn: (yes: boolean) => void) {
-        prompt(msg, function (val) {
-            fn(/^ *y(es)?/i.test(val));
-        });
-        function prompt(msg: string, fn: (data: string) => void) {
-            if (' ' === msg[msg.length - 1]) {
-                process.stdout.write(msg);
-            } else {
-                console.log(msg);
-            }
-            process.stdin.setEncoding('ascii');
-            process.stdin.once('data', function (data) {
-                fn(data.toString());
-            }).resume();
-        }
-    }
 
     function createApplicationAt(ph: string) {
         copy(path.join(__dirname, '../template'), ph);
@@ -247,8 +539,23 @@ function init() {
 
 }
 
+function confirm(msg: string, fn: (yes: boolean) => void) {
+    prompt(msg, function (val) {
+        val = val.trim().toLowerCase();
+        fn(val === "y" || val === "yes");
+    });
+    function prompt(msg: string, fn: (data: string) => void) {
+        console.log(msg);
+        process.stdin.setEncoding('ascii');
+        process.stdin.once('data', function (data) {
+            process.stdin.destroy();
+            fn(data.toString());
+        }).resume();
+    }
+}
 
-function start(opts: { "env": string, "daemon": boolean, "serverIds": string }) {
+
+function start(opts: { "env": string, "daemon": boolean, "serverIds": string[] }) {
 
     let absScript = path.resolve(process.cwd(), 'app.js');
     if (!fs.existsSync(absScript)) {
@@ -287,17 +594,17 @@ function start(opts: { "env": string, "daemon": boolean, "serverIds": string }) 
 
 }
 
-function list(opts: any) {
-    let interval = Number(opts.interval) || 5;
+function list(opts: { "host": string, "port": number, "token": string, "interval": number }) {
+    let interval = Math.ceil(opts.interval);
     if (interval < 1) {
         interval = 1;
     }
     connectToMaster(opts.host, opts.port, opts.token, function (client) {
-        console.log("\n");
+        console.log("");
         requestList();
         let rowNum = 0;
         function requestList() {
-            client.request({ "func": "list" }, function (err, msg: { "name": string, "env": string, "serverTypeSort": string[], "infoArr": string[][] }) {
+            client.request({ "func": "list" }, 10, function (err, msg: { "name": string, "env": string, "serverTypeSort": string[], "infoArr": string[][] }) {
                 if (err) {
                     return abort(err);
                 }
@@ -426,51 +733,69 @@ function list(opts: any) {
 
 }
 
-function stop(opts: any) {
-    connectToMaster(opts.host, opts.port, opts.token, function (client) {
-        client.request({ "func": "stop" }, function (err) {
-            if (err) {
-                return abort(err);
-            }
-            abort("the application has stopped, please confirm!");
+function stop(opts: { "host": string, "port": number, "token": string }) {
+    confirm('stop the server ? (y/n) [no]   ', (yes) => {
+        if (!yes) {
+            abort("[ canceled ]")
+            return;
+        }
+        connectToMaster(opts.host, opts.port, opts.token, function (client) {
+            client.request({ "func": "stop" }, 3600, function (err) {
+                if (err) {
+                    return abort(err);
+                }
+                abort("the application has stopped, please confirm!");
+            });
         });
-    });
+    })
+
 }
 
-function remove(opts: any) {
+function remove(opts: { "host": string, "port": number, "token": string, "serverIds": string[] }) {
     if (opts.serverIds.length === 0) {
-        return abort("no server input, please use `mydog remove server-id-1 server-id-2` ")
+        return abort("no server input, please use like `mydog remove serverId-1 [serverId-2 ...]` ")
     }
-    connectToMaster(opts.host, opts.port, opts.token, function (client) {
-        client.request({ "func": "remove", "args": opts.serverIds }, function (err) {
-            if (err) {
-                return abort(err);
-            }
-            abort("the servers have been removed, please confirm!");
+    confirm(`remove server: ${opts.serverIds.join(" ")} ? (y/n) [no]   `, (yes) => {
+        if (!yes) {
+            abort("[ canceled ]")
+            return;
+        }
+        connectToMaster(opts.host, opts.port, opts.token, function (client) {
+            client.request({ "func": "remove", "args": opts.serverIds }, 10, function (err) {
+                if (err) {
+                    return abort(err);
+                }
+                abort("the servers have been removed, please confirm!");
+            });
         });
     });
+
 }
 
-function removeT(opts: any) {
+function removeT(opts: { "host": string, "port": number, "token": string, "serverTypes": string[] }) {
     if (opts.serverTypes.length === 0) {
-        return abort("no serverType input, please use `mydog removeT gate connector` ")
+        return abort("no serverType input, please use like `mydog removeT serverType-1 [serverType-2 ...]` ")
     }
-    connectToMaster(opts.host, opts.port, opts.token, function (client) {
-        client.request({ "func": "removeT", "args": opts.serverTypes }, function (err) {
-            if (err) {
-                return abort(err);
-            }
-            abort("the serverTypes have been removed, please confirm!");
+    confirm(`remove serverType: ${opts.serverTypes.join(" ")} ? (y/n) [no]   `, (yes) => {
+        if (!yes) {
+            abort("[ canceled ]")
+            return;
+        }
+        connectToMaster(opts.host, opts.port, opts.token, function (client) {
+            client.request({ "func": "removeT", "args": opts.serverTypes }, 10, function (err) {
+                if (err) {
+                    return abort(err);
+                }
+                abort("the serverTypes have been removed, please confirm!");
+            });
         });
     });
 }
 
 
-function cmd() {
+function cmd(lans: string[]) {
     let routePath = "config/sys/route.ts";
     let serverPath = "config/cmd.ts";
-    let clientPathCs = "config/CmdClient.cs"
-    let clientPathTs = "config/cmdClient.ts"
     let nowPath = process.cwd();
     let filepath = path.join(nowPath, routePath);
     if (!fs.existsSync(filepath)) {
@@ -542,28 +867,69 @@ function cmd() {
     }
 
     function clientCmd() {
-        let endStrCs = 'public class Cmd\n{\n'
-        let endStrTs = 'export const enum cmd {\n'
-        for (let one of cmdObjArr) {
-            if (one.note) {
-                endStrCs += `\t/// <summary>\n\t/// ${one.note}\n\t/// </summary>\n`;
-                endStrTs += `\t/**\n\t * ${one.note}\n\t */\n`;
-            }
-            let oneStr = one.cmd;
-            if (one.cmd.indexOf('.') !== -1) {
-                let tmpArr = one.cmd.split('.');
-                oneStr = tmpArr[0] + '_' + tmpArr[1] + '_' + tmpArr[2];
-            }
-            endStrCs += `\tpublic const string ${oneStr} = "${one.cmd}";\n`;
-            endStrTs += `\t${oneStr} = "${one.cmd}",\n`;
+        let clipath = path.join(nowPath, "mydog_cli.js");
+        if (!fs.existsSync(clipath)) {
+            return;
         }
-
-        endStrCs += '}';
-        endStrTs += '}';
-        fs.writeFileSync(path.join(nowPath, clientPathCs), endStrCs);
-        fs.writeFileSync(path.join(nowPath, clientPathTs), endStrTs);
+        let file = require(path.join(nowPath, "mydog_cli.js"));
+        if (file.mydog_cmd && typeof file.mydog_cmd === "function") {
+            file.mydog_cmd(lans, cmdObjArr);
+        }
     }
 
+}
+
+function send(opts: { "host": string, "port": number, "token": string, "serverId": string, "serverType": string }, argv: string[]) {
+    if (argv.length === 0) {
+        return abort("At least one argv is required");
+    }
+    let serverIds: string[] = [];
+    let serverTypes: string[] = [];
+    let endMsg: { "serverIds": string[], "serverTypes": string[], "argv": string[] } = {} as any;
+    if (opts.serverId) {
+        serverIds = opts.serverId.split(" ");
+        endMsg["serverIds"] = serverIds;
+    } else if (opts.serverType) {
+        serverTypes = opts.serverType.split(" ");
+        endMsg["serverTypes"] = serverTypes;
+    }
+    endMsg["argv"] = argv;
+    let msg = `sendMsg:
+{
+    "serverIds": ${JSON.stringify(serverIds)}
+    "serverTypes": ${JSON.stringify(serverTypes)}
+    "argv": ${JSON.stringify(argv)}
+}
+(y/n)[no] ?    `
+    confirm(msg, (yes) => {
+        if (!yes) {
+            abort("[ canceled ]")
+            return;
+        }
+        connectToMaster(opts.host, opts.port, opts.token, function (client) {
+            console.log();
+            client.request({ "func": "send", "args": endMsg }, 60, function (err, data: { "err": string, "timeoutIds": string[], "data": any[] }) {
+                client.close(false);
+                if (err) {
+                    return abort(err);
+                }
+                if (data.err) {
+                    return abort(data.err);
+                }
+                let clipath = path.join(process.cwd(), "mydog_cli.js");
+                if (!fs.existsSync(clipath)) {
+                    console.log(data);
+                    return;
+                }
+                let file = require(path.join(process.cwd(), "mydog_cli.js"));
+                if (file.mydog_send && typeof file.mydog_send === "function") {
+                    file.mydog_send(endMsg, data.timeoutIds, data.data);
+                } else {
+                    console.log(data);
+                }
+            });
+        });
+    });
 }
 
 
